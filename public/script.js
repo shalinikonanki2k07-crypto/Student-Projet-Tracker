@@ -10,13 +10,12 @@ const message = document.querySelector('#message');
 
 let projects = [];
 let editingId = null;
+let mutationPending = false;
 
-// Display a clear message to the user.
 function showMessage(text) {
     message.textContent = text;
 }
 
-// Read an API error message when available.
 async function readError(response) {
     try {
         const data = await response.json();
@@ -30,7 +29,15 @@ async function readError(response) {
     return `Request failed (${response.status} ${response.statusText}).`;
 }
 
-// Reset the form to Add mode.
+function updateMutationControls() {
+    saveButton.disabled = mutationPending;
+    cancelButton.disabled = mutationPending;
+
+    projectList.querySelectorAll('button').forEach(button => {
+        button.disabled = mutationPending;
+    });
+}
+
 function resetForm() {
     form.reset();
     editingId = null;
@@ -38,8 +45,12 @@ function resetForm() {
     cancelButton.hidden = true;
 }
 
-// Load the current collection from the API and render it.
-async function loadProjects() {
+async function loadProjects(showLoading = false) {
+    if (showLoading) {
+        showMessage('Loading projects...');
+        if (emptyState) emptyState.hidden = true;
+    }
+
     try {
         const response = await fetch('/api/projects');
 
@@ -55,7 +66,6 @@ async function loadProjects() {
 
         projects = data;
 
-        // If the project being edited no longer exists, leave edit mode.
         if (
             editingId !== null &&
             !projects.some(project => String(project.id) === String(editingId))
@@ -65,6 +75,13 @@ async function loadProjects() {
         }
 
         renderProjects();
+
+        if (projects.length === 0) {
+            showMessage('No projects yet. Add your first project.');
+        } else if (showLoading) {
+            showMessage('');
+        }
+
         return true;
     } catch (error) {
         showMessage(
@@ -72,11 +89,16 @@ async function loadProjects() {
                 ? 'Could not connect to the server. Check that it is running and try again.'
                 : error.message || 'Could not load projects.'
         );
+
+        // Do not show an empty collection when loading failed.
+        if (showLoading && emptyState) {
+            emptyState.hidden = true;
+        }
+
         return false;
     }
 }
 
-// Display all projects returned by the API.
 function renderProjects() {
     projectList.replaceChildren();
 
@@ -92,8 +114,11 @@ function renderProjects() {
         const editButton = document.createElement('button');
         editButton.type = 'button';
         editButton.textContent = 'Edit';
+        editButton.disabled = mutationPending;
 
         editButton.addEventListener('click', () => {
+            if (mutationPending) return;
+
             editingId = project.id;
             nameInput.value = project.name;
             statusInput.value = project.status;
@@ -108,17 +133,20 @@ function renderProjects() {
         const deleteButton = document.createElement('button');
         deleteButton.type = 'button';
         deleteButton.textContent = 'Delete';
+        deleteButton.disabled = mutationPending;
 
         deleteButton.addEventListener('click', async () => {
+            if (mutationPending) return;
+
             const confirmed = window.confirm(
                 `Are you sure you want to delete "${project.name}"?`
             );
 
-            if (!confirmed) {
-                return;
-            }
+            if (!confirmed || mutationPending) return;
 
-            deleteButton.disabled = true;
+            mutationPending = true;
+            updateMutationControls();
+            showMessage('Deleting project...');
 
             try {
                 const response = await fetch(
@@ -143,7 +171,8 @@ function renderProjects() {
                         : error.message || 'Could not delete the project.'
                 );
             } finally {
-                deleteButton.disabled = false;
+                mutationPending = false;
+                updateMutationControls();
             }
         });
 
@@ -158,13 +187,16 @@ function renderProjects() {
     });
 
     if (emptyState) {
-        emptyState.hidden = projects.length > 0;
+        emptyState.hidden = projects.length > 0 || mutationPending;
     }
+
+    updateMutationControls();
 }
 
-// Add a project or save edits through the API.
 form.addEventListener('submit', async event => {
     event.preventDefault();
+
+    if (mutationPending) return;
 
     const name = nameInput.value.trim();
     const status = statusInput.value;
@@ -186,14 +218,20 @@ form.addEventListener('submit', async event => {
         return;
     }
 
+    // Preserve the user's input in case the request fails.
+    const savedName = nameInput.value;
+    const savedStatus = statusInput.value;
     const wasEditing = editingId !== null;
+
     const url = wasEditing
         ? `/api/projects/${encodeURIComponent(editingId)}`
         : '/api/projects';
+
     const method = wasEditing ? 'PUT' : 'POST';
 
-    saveButton.disabled = true;
-    cancelButton.disabled = true;
+    mutationPending = true;
+    updateMutationControls();
+    showMessage(wasEditing ? 'Saving changes...' : 'Saving project...');
 
     try {
         const response = await fetch(url, {
@@ -208,35 +246,37 @@ form.addEventListener('submit', async event => {
             throw new Error(await readError(response));
         }
 
-        // Do not reset the form until the API mutation succeeds.
+        resetForm();
         showMessage(
             wasEditing
                 ? 'Project updated successfully.'
                 : 'Project added successfully.'
         );
 
-        resetForm();
         await loadProjects();
         nameInput.focus();
     } catch (error) {
+        nameInput.value = savedName;
+        statusInput.value = savedStatus;
+
         showMessage(
             error instanceof TypeError
                 ? 'Could not connect to the server. Your input has been kept; please try again.'
-                : error.message || 'The project could not be saved. Your input has been kept.'
+                : `${error.message || 'The project could not be saved.'} Your input has been kept.`
         );
     } finally {
-        saveButton.disabled = false;
-        cancelButton.disabled = false;
+        mutationPending = false;
+        updateMutationControls();
     }
 });
 
-// Cancel editing without sending an API request.
 cancelButton.addEventListener('click', () => {
+    if (mutationPending) return;
+
     resetForm();
     showMessage('Edit cancelled. No changes were saved.');
     nameInput.focus();
 });
 
-// Load projects when the page starts.
 resetForm();
-loadProjects();
+loadProjects(true);
